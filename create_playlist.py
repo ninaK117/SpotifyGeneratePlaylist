@@ -1,20 +1,21 @@
-import json
 import os
-
+import json
+import requests
 import google_auth_oauthlib.flow
 import googleapiclient.discovery
 import googleapiclient.errors
-import requests
 import youtube_dl
-
 from exceptions import ResponseException
-from secrets import spotify_token, spotify_user_id
+from secrets import spotify_token, spotify_user_id, client_id, client_secret
 
 
 class CreatePlaylist:
     def __init__(self):
+        self.CLIENT_ID = client_id
+        self.CLIENT_SECRET = client_secret
+        self.USER_ID = spotify_user_id
         self.youtube_client = self.get_youtube_client()
-        self.all_song_info = {}
+        self.all_song_info={}
 
     def get_youtube_client(self):
         """ Log Into Youtube, Copied from Youtube Data API """
@@ -39,61 +40,89 @@ class CreatePlaylist:
         return youtube_client
 
     def get_liked_videos(self):
-        """Grab Our Liked Videos & Create A Dictionary Of Important Song Information"""
+
+        items = list()
         request = self.youtube_client.videos().list(
-            part="snippet,contentDetails,statistics",
-            myRating="like"
+            part="snippet, contentDetails, statistics, id",
+            myRating="like",
+            maxResults=50
         )
+
         response = request.execute()
 
-        # collect each video and get important information
-        for item in response["items"]:
+        items = response["items"]
+        next_page_token = response["nextPageToken"]
+
+        while "nextPageToken" in response:
+            next_page = self.youtube_client.videos().list(
+                part="snippet, contentDetails, statistics, id",
+                myRating="like",
+                maxResults=50,
+                pageToken=next_page_token,
+            )
+            response = next_page.execute()
+
+            items.extend(response["items"])
+            if 'nextPageToken' not in response:
+                response.pop('nextPageToken', None)
+            else:
+                next_page_token = response['nextPageToken']
+
+        for item in items:
             video_title = item["snippet"]["title"]
             youtube_url = "https://www.youtube.com/watch?v={}".format(
                 item["id"])
 
-            # use youtube_dl to collect the song name & artist name
-            video = youtube_dl.YoutubeDL({}).extract_info(
-                youtube_url, download=False)
+            # use youtube_dl to collect the song name and artist name
+            video = None
+            try:
+                video = youtube_dl.YoutubeDL({}).extract_info(youtube_url, download=False)
+            except:  # exceptions due to copyright or video availablility may occur
+                continue
+
             song_name = video["track"]
             artist = video["artist"]
 
             if song_name is not None and artist is not None:
                 # save all important info and skip any missing song and artist
+                spotify_uri = self.get_spotify_uri(song_name, artist)
+                if spotify_uri == "-1":
+                    continue  # no tracks found
+
                 self.all_song_info[video_title] = {
                     "youtube_url": youtube_url,
                     "song_name": song_name,
                     "artist": artist,
 
                     # add the uri, easy to get song to put into playlist
-                    "spotify_uri": self.get_spotify_uri(song_name, artist)
-
+                    "spotify_uri": spotify_uri
                 }
 
     def create_playlist(self):
-        """Create A New Playlist"""
         request_body = json.dumps({
-            "name": "Youtube Liked Vids",
+            "name": "Liked Youtube Videos",
             "description": "All Liked Youtube Videos",
             "public": True
         })
 
-        query = "https://api.spotify.com/v1/users/{}/playlists".format(
-            spotify_user_id)
+        query = "https://api.spotify.com/v1/users/{}/playlists".format(self.USER_ID)
         response = requests.post(
             query,
             data=request_body,
             headers={
+                "Accept": "application/json",
                 "Content-Type": "application/json",
                 "Authorization": "Bearer {}".format(spotify_token)
             }
         )
-        response_json = response.json()
 
-        # playlist id
+        response_json = response.json()
         return response_json["id"]
 
     def get_spotify_uri(self, song_name, artist):
+
+        #query = "https://api.spotify.com/v1/search?q={}+{}&type=track&limit=5".format(
+
         """Search For the Song"""
         query = "https://api.spotify.com/v1/search?query=track%3A{}+artist%3A{}&type=track&offset=0&limit=20".format(
             song_name,
@@ -107,6 +136,11 @@ class CreatePlaylist:
             }
         )
         response_json = response.json()
+
+        # no tracks found
+        if response_json["tracks"]["total"] == 0:
+            return "-1"
+
         songs = response_json["tracks"]["items"]
 
         # only use the first song
@@ -115,8 +149,8 @@ class CreatePlaylist:
         return uri
 
     def add_song_to_playlist(self):
-        """Add all liked songs into a new Spotify playlist"""
-        # populate dictionary with our liked songs
+
+        # populate our songs dictionary
         self.get_liked_videos()
 
         # collect all of uri
@@ -129,8 +163,7 @@ class CreatePlaylist:
         # add all songs into new playlist
         request_data = json.dumps(uris)
 
-        query = "https://api.spotify.com/v1/playlists/{}/tracks".format(
-            playlist_id)
+        query = "https://api.spotify.com/v1/playlists/{}/tracks".format(playlist_id)
 
         response = requests.post(
             query,
@@ -140,9 +173,10 @@ class CreatePlaylist:
                 "Authorization": "Bearer {}".format(spotify_token)
             }
         )
+        response_json = response.json()
 
         # check for valid response status
-        if response.status_code != 200:
+        if response.status_code != 201:
             raise ResponseException(response.status_code)
 
         response_json = response.json()
