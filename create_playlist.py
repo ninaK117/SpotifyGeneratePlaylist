@@ -6,13 +6,11 @@ import googleapiclient.discovery
 import googleapiclient.errors
 import youtube_dl
 from exceptions import ResponseException
-from secrets import spotify_token, spotify_user_id, client_id, client_secret
+from secrets import spotify_token, spotify_user_id
 
 
 class CreatePlaylist:
     def __init__(self):
-        self.CLIENT_ID = client_id
-        self.CLIENT_SECRET = client_secret
         self.USER_ID = spotify_user_id
         self.youtube_client = self.get_youtube_client()
         self.all_song_info={}
